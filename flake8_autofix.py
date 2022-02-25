@@ -1,19 +1,27 @@
-import os
-import subprocess as sp
+#!/usr/bin/env python3.9
+import argparse
 import multiprocessing
+import os
 import re
+import subprocess as sp
 
 omitlist = []
 
 
-def flake8_file(fpath):
+def flake8_file(fpath, select=None):
     '''
     see all messages in 1 file
     '''
-    file = sp.getoutput('flake8 ' + fpath)
+    options = ""
+    if select:
+        options += f' --select="{select}"'
+
+    file = sp.getoutput(f'flake8{options} "{fpath}"')
+
     filelist = file.strip().split('\n')
     filelist = list(filter(None, filelist))
     filelist = [x for x in filelist if x not in omitlist]
+
     return filelist
 
 
@@ -29,13 +37,19 @@ def extract_details(entry):
     return (path, row, col, message, entry)
 
 
-def get_all_files():
+def get_all_files(source, select=None):
     '''
     get all files that need linting
     '''
-    flake8 = sp.getoutput('flake8 ' + os.getcwd())
-    flakelist = flake8.strip().split('\n')
-    return {x.split(':')[0] for x in flakelist}
+    options = ""
+    if select:
+        options += f' --select="{select}"'
+
+    source_files = " ".join(f'"{target}"' for target in source)
+    flake8 = sp.getoutput(f"flake8{options} {source_files}")
+    offending_files = {x.split(':')[0] for x in flake8.strip().split('\n')}
+
+    return offending_files
 
 
 def find_fix(message):
@@ -53,7 +67,6 @@ def delete_line(bundle):
     '''
     delete line of mentioned row
     '''
-    print('deleting line')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -66,7 +79,6 @@ def delete_blank_line(bundle):
     '''
     delete previous line of mentioned row
     '''
-    print('deleting blank line')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -79,7 +91,6 @@ def insert_line(bundle):
     '''
     insert an new line at row
     '''
-    print('inserting line')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -93,7 +104,6 @@ def newline_EOF(bundle):
     '''
     insert new line at EOF
     '''
-    print('inserting line at end')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -106,7 +116,6 @@ def insert_space_before(bundle):
     '''
     insert space at mentioned col
     '''
-    print('inserting space')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -122,7 +131,6 @@ def insert_space_after(bundle):
     '''
     insert space after mentioned col
     '''
-    print('inserting space')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -138,7 +146,6 @@ def convert_tabs_to_spaces(bundle):
     '''
     convert all tabs to 4 spaces
     '''
-    print('converting tabs to spaces')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -151,7 +158,6 @@ def remove_semicolon(bundle):
     '''
     remove semicolons
     '''
-    print('deleting semicolon')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -165,7 +171,6 @@ def delete_character(bundle):
     '''
     delete a character at row, col
     '''
-    print('deleting character')
     lines, details = bundle
     path, row, col, message, entry = details
     with open(path, 'w') as f:
@@ -175,11 +180,21 @@ def delete_character(bundle):
             f.write(line)
 
 
+def fix_trailing_whitespace(bundle):
+    """Fix trailing whitespace."""
+    lines, details = bundle
+    path, row, _, _, _ = details
+    with open(path, 'w') as f:
+        for index, line in enumerate(lines):
+            if index == row:
+                line = f"{line.rstrip()}\n"
+            f.write(line)
+
+
 def delete_unused_import(bundle):
     '''
     delete a character at row, col
     '''
-    print('deleting unused import')
     global omitlist
     lines, details = bundle
     path, row, col, message, entry = details
@@ -198,7 +213,6 @@ def delete_unused_import(bundle):
                 else:
                     f.write(line)
     else:
-        print("Manually fix", entry)
         omitlist.append(entry)
 
 
@@ -224,7 +238,7 @@ func_fix = {
     'E703': remove_semicolon,
     'F401': delete_unused_import,
     'W191': convert_tabs_to_spaces,
-    'W291': delete_character,
+    'W291': fix_trailing_whitespace,
     'W292': newline_EOF,
     'W293': delete_character,
     'W391': delete_line,
@@ -237,30 +251,50 @@ def solution_selector(full_details):
     '''
     global omitlist
     path, row, col, message, entry = full_details
-    # details = (path, row, col, message)
+
+    key = find_fix(message)
+    if key is None:
+        omitlist.append(entry)
+        return
+
+    print(f"Fixing {entry}")
     with open(path, 'r') as f:
         lines = f.readlines()
-        key = find_fix(message)
-        if key is None:
-            print("Manually fix", entry)
-            omitlist.append(entry)
-        else:
-            print(key, entry)
-            bundle = (lines, full_details)
-            func_fix[key](bundle)
+        bundle = (lines, full_details)
+        func_fix[key](bundle)
 
 
-def fix_a_file(file):
+def fix_a_file(file, select):
     resolved = False
     while not resolved:
-        file_errors = flake8_file(file)
-        if(len(file_errors) == 0):
-            resolved = True
-        else:
+        file_errors = flake8_file(file, select=select)
+        if file_errors:
             details = extract_details(file_errors[0])
             solution_selector(details)
+        else:
+            resolved = True
 
 
-files = get_all_files()
-p = multiprocessing.Pool(multiprocessing.cpu_count())
-p.map(fix_a_file, files)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-j", "--jobs", type=int, default=multiprocessing.cpu_count())
+    parser.add_argument("--select", default="")
+    parser.add_argument("source", nargs="*", default=[os.getcwd()])
+    args = parser.parse_args()
+
+    files = get_all_files(args.source, select=args.select)
+
+    if args.jobs:
+        p = multiprocessing.Pool(args.jobs)
+        p.starmap(fix_a_file, [(file, args.select) for file in files])
+    else:
+        for file in files:
+            global omitlist
+            omitlist.clear()
+            fix_a_file(file, args.select)
+
+    return 0
+
+
+if __name__ == "__main__":
+    exit(main())
